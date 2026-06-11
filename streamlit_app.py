@@ -1,7 +1,7 @@
 import streamlit as st
 import pandas as pd
-import math
 import requests
+import plotly.express as px
 from pathlib import Path
 from datetime import datetime
 
@@ -17,6 +17,7 @@ INDICATORS = {
 }
 
 CHART_TYPES = ['Line', 'Area', 'Bar']
+PALETTE = px.colors.qualitative.Plotly
 
 
 @st.cache_data(ttl='1d', show_spinner='Fetching latest data from World Bank...')
@@ -79,15 +80,94 @@ def interpolate_missing(df):
     return df.groupby('Country Code', group_keys=False).apply(_interp).reset_index(drop=True)
 
 
-# ── Sidebar controls (collapses on mobile) ────────────────────────────────────
+def scale_for_display(df, metric_label):
+    """Return copy with 'value' column scaled for charts, plus y-axis label."""
+    d = df.copy()
+    if metric_label == 'Total GDP':
+        d['value'] = d['GDP'] / 1e9
+        return d, 'GDP (Billion USD)'
+    d['value'] = d['GDP']
+    return d, 'GDP per Capita (USD)'
+
+
+def chart_layout(fig, y_title):
+    fig.update_layout(
+        hovermode='x unified',
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)',
+        legend=dict(
+            orientation='h',
+            yanchor='bottom', y=1.02,
+            xanchor='right', x=1,
+            title='',
+        ),
+        margin=dict(l=0, r=0, t=40, b=0),
+        yaxis=dict(
+            title=y_title,
+            gridcolor='rgba(150,150,150,0.2)',
+            tickprefix='$',
+            tickformat=',.0f',
+        ),
+        xaxis=dict(title='', gridcolor='rgba(150,150,150,0.1)'),
+    )
+    return fig
+
+
+def make_timeseries(df, y_title, chart_type, color_map):
+    kwargs = dict(
+        data_frame=df,
+        x='Year',
+        y='value',
+        color='Country Code',
+        labels={'value': y_title, 'Country Code': 'Country'},
+        color_discrete_map=color_map,
+    )
+    if chart_type == 'Line':
+        fig = px.line(**kwargs)
+        fig.update_traces(line=dict(width=2))
+    elif chart_type == 'Area':
+        fig = px.area(**kwargs)
+    else:
+        fig = px.bar(**kwargs, barmode='group')
+
+    return chart_layout(fig, y_title)
+
+
+def make_ranking(df, y_title, year, color_map):
+    ranked = df.dropna(subset=['value']).sort_values('value', ascending=True)
+    fig = px.bar(
+        ranked,
+        x='value',
+        y='Country Code',
+        orientation='h',
+        color='Country Code',
+        labels={'value': y_title, 'Country Code': ''},
+        color_discrete_map=color_map,
+        title=f'Ranking — {year}',
+    )
+    fig.update_layout(
+        showlegend=False,
+        plot_bgcolor='rgba(0,0,0,0)',
+        paper_bgcolor='rgba(0,0,0,0)',
+        margin=dict(l=0, r=10, t=40, b=0),
+        xaxis=dict(
+            title=y_title,
+            gridcolor='rgba(150,150,150,0.2)',
+            tickprefix='$',
+            tickformat=',.0f',
+        ),
+        yaxis=dict(title=''),
+    )
+    return fig
+
+
+# ── Sidebar ───────────────────────────────────────────────────────────────────
 
 with st.sidebar:
     st.header('Controls')
 
     metric_label = st.radio('Metric', list(INDICATORS.keys()))
-
     chart_type = st.radio('Chart type', CHART_TYPES)
-
     use_interp = st.checkbox('Interpolate missing values')
 
     indicator = INDICATORS[metric_label]
@@ -129,7 +209,7 @@ with st.sidebar:
     if not selected_countries:
         st.warning('Select at least one country')
 
-# ── Main content ──────────────────────────────────────────────────────────────
+# ── Main ──────────────────────────────────────────────────────────────────────
 
 '''
 # :earth_americas: GDP dashboard
@@ -140,21 +220,43 @@ Browse GDP data from the [World Bank Open Data](https://data.worldbank.org/) web
 if not selected_countries:
     st.stop()
 
+# Consistent color mapping across all charts
+color_map = {c: PALETTE[i % len(PALETTE)] for i, c in enumerate(selected_countries)}
+
 filtered = gdp_df[
     gdp_df['Country Code'].isin(selected_countries)
     & gdp_df['Year'].between(from_year, to_year)
 ]
 
-st.header(f'{metric_label} over time', divider='gray')
+display_filtered, y_title = scale_for_display(filtered, metric_label)
 
-if chart_type == 'Line':
-    st.line_chart(filtered, x='Year', y='GDP', color='Country Code')
-elif chart_type == 'Area':
-    st.area_chart(filtered, x='Year', y='GDP', color='Country Code')
-else:
-    st.bar_chart(filtered, x='Year', y='GDP', color='Country Code')
+rank_raw = gdp_df[
+    (gdp_df['Year'] == to_year) & gdp_df['Country Code'].isin(selected_countries)
+]
+display_rank, _ = scale_for_display(rank_raw, metric_label)
 
-''
+# ── Charts ────────────────────────────────────────────────────────────────────
+
+st.header(f'{metric_label} overview', divider='gray')
+
+col_ts, col_rank = st.columns([2, 1])
+
+with col_ts:
+    st.plotly_chart(
+        make_timeseries(display_filtered, y_title, chart_type, color_map),
+        use_container_width=True,
+    )
+
+with col_rank:
+    if not display_rank.dropna(subset=['value']).empty:
+        st.plotly_chart(
+            make_ranking(display_rank, y_title, to_year, color_map),
+            use_container_width=True,
+        )
+    else:
+        st.info(f'No data available for {to_year}.')
+
+# ── Metric cards ──────────────────────────────────────────────────────────────
 
 first_year_df = gdp_df[gdp_df['Year'] == from_year]
 last_year_df = gdp_df[gdp_df['Year'] == to_year]
